@@ -1,0 +1,164 @@
+name: Sync Upstream Release
+
+on:
+  schedule:
+    # Check every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force sync even if versions match'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  sync-and-release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      UPSTREAM_REPO: router-for-me/Cli-Proxy-API-Management-Center
+
+    steps:
+      - name: Check upstream latest release
+        id: upstream
+        run: |
+          RELEASE_JSON=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest")
+
+          UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+          if [ -z "$UPSTREAM_TAG" ]; then
+            echo "No upstream release found"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest release: $UPSTREAM_TAG"
+
+      - name: Check fork latest release
+        if: steps.upstream.outputs.skip != 'true'
+        id: fork
+        run: |
+          FORK_JSON=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
+
+          FORK_TAG=$(echo "$FORK_JSON" | jq -r '.tag_name // empty')
+          echo "tag=$FORK_TAG" >> "$GITHUB_OUTPUT"
+          echo "Fork latest release: ${FORK_TAG:-none}"
+
+      - name: Decide whether to sync
+        if: steps.upstream.outputs.skip != 'true'
+        id: decide
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.tag }}"
+          FORK="${{ steps.fork.outputs.tag }}"
+          FORCE="${{ inputs.force_sync }}"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "Force sync requested"
+            echo "sync=true" >> "$GITHUB_OUTPUT"
+          elif [ "$UPSTREAM" != "$FORK" ]; then
+            echo "New upstream release detected: $UPSTREAM (fork has: ${FORK:-none})"
+            echo "sync=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Fork is up to date ($FORK)"
+            echo "sync=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout fork
+        if: steps.decide.outputs.sync == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Add upstream remote and merge
+        if: steps.decide.outputs.sync == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git" || true
+          git fetch upstream --tags
+
+          UPSTREAM_TAG="${{ steps.upstream.outputs.tag }}"
+
+          # Try to merge upstream tag into current branch
+          echo "Merging upstream tag $UPSTREAM_TAG..."
+          if git merge "$UPSTREAM_TAG" --no-edit -m "Merge upstream release $UPSTREAM_TAG"; then
+            echo "Merge successful"
+          else
+            echo "::warning::Merge conflict detected. Attempting auto-resolution..."
+            # Accept upstream changes for conflicts (upstream wins)
+            git checkout --theirs .
+            git add -A
+            git commit --no-edit -m "Merge upstream release $UPSTREAM_TAG (auto-resolved conflicts, upstream wins)"
+          fi
+
+          git push origin HEAD
+
+      - name: Setup Node.js
+        if: steps.decide.outputs.sync == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.decide.outputs.sync == 'true'
+        run: npm ci
+
+      - name: Build all-in-one HTML
+        if: steps.decide.outputs.sync == 'true'
+        run: npm run build
+        env:
+          VERSION: ${{ steps.upstream.outputs.tag }}
+
+      - name: Prepare release asset
+        if: steps.decide.outputs.sync == 'true'
+        run: |
+          cd dist
+          mv index.html management.html
+          ls -lh management.html
+
+      - name: Generate release notes
+        if: steps.decide.outputs.sync == 'true'
+        run: |
+          UPSTREAM_TAG="${{ steps.upstream.outputs.tag }}"
+          FORK_TAG="${{ steps.fork.outputs.tag }}"
+
+          cat > release-notes.md << EOF
+          ## Synced from upstream release \`$UPSTREAM_TAG\`
+
+          **Upstream**: https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/$UPSTREAM_TAG
+
+          This release was automatically synced from the upstream repository.
+
+          ### Changes
+          EOF
+
+          if [ -n "$FORK_TAG" ]; then
+            git log --pretty=format:"- %h %s" "${FORK_TAG}..HEAD" >> release-notes.md
+          else
+            git log --pretty=format:"- %h %s" -20 >> release-notes.md
+          fi
+
+      - name: Create Release
+        if: steps.decide.outputs.sync == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.upstream.outputs.tag }}
+          name: ${{ steps.upstream.outputs.tag }}
+          files: dist/management.html
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
