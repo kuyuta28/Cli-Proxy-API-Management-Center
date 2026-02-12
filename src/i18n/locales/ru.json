@@ -432,7 +432,19 @@
     "quota_refresh_single": "Обновить квоту",
     "quota_refresh_hint": "Обновить квоту только для этих учётных данных",
     "quota_refresh_success": "Квота для \"{{name}}\" обновлена",
-    "quota_refresh_failed": "Не удалось обновить квоту для \"{{name}}\": {{message}}"
+    "quota_refresh_failed": "Не удалось обновить квоту для \"{{name}}\": {{message}}",
+    "test_button": "Тест подключения",
+    "test_no_auth_index": "У этого файла авторизации нет auth_index, тестирование невозможно.",
+    "test_select_model": "Выберите модель для теста",
+    "test_loading_models": "Загрузка доступных моделей...",
+    "test_load_models_failed": "Не удалось загрузить модели",
+    "test_with_model": "Тестировать с {{model}}",
+    "test_success": "Тест пройден — модель ответила.",
+    "test_failed": "Тест не пройден",
+    "test_timeout": "Запрос теста истёк через {{seconds}} секунд.",
+    "test_result_title": "Результат теста",
+    "test_duration": "Время",
+    "test_response": "Ответ"
   },
   "antigravity_quota": {
     "title": "Квота Antigravity",

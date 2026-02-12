@@ -429,7 +429,19 @@
     "prefix_proxy_invalid_json": "This credential is not a JSON object and cannot be edited.",
     "prefix_proxy_saved_success": "Updated \"{{name}}\" successfully",
     "quota_refresh_success": "Quota refreshed for \"{{name}}\"",
-    "quota_refresh_failed": "Failed to refresh quota for \"{{name}}\": {{message}}"
+    "quota_refresh_failed": "Failed to refresh quota for \"{{name}}\": {{message}}",
+    "test_button": "Test Connection",
+    "test_no_auth_index": "This auth file has no auth_index and cannot be tested.",
+    "test_select_model": "Select Model to Test",
+    "test_loading_models": "Loading available models...",
+    "test_load_models_failed": "Failed to load models",
+    "test_with_model": "Test with {{model}}",
+    "test_success": "Test succeeded — the model responded.",
+    "test_failed": "Test failed",
+    "test_timeout": "Test request timed out after {{seconds}} seconds.",
+    "test_result_title": "Test Result",
+    "test_duration": "Duration",
+    "test_response": "Response"
   },
   "antigravity_quota": {
     "title": "Antigravity Quota",

@@ -19,11 +19,12 @@ import {
   IconDownload,
   IconInfo,
   IconTrash2,
+  IconZap,
 } from '@/components/ui/icons';
 import type { TFunction } from 'i18next';
 import { ANTIGRAVITY_CONFIG, CODEX_CONFIG, GEMINI_CLI_CONFIG } from '@/components/quota';
 import { useAuthStore, useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
-import { authFilesApi, usageApi } from '@/services/api';
+import { authFilesApi, usageApi, apiCallApi, apiKeysApi, getApiCallErrorMessage } from '@/services/api';
 import { apiClient } from '@/services/api/client';
 import type { AuthFileItem, OAuthModelAliasEntry } from '@/types';
 import { getStatusFromError, resolveAuthProvider } from '@/utils/quota';
@@ -245,6 +246,7 @@ export function AuthFilesPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const apiBase = useAuthStore((state) => state.apiBase);
   const resolvedTheme: ResolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const antigravityQuota = useQuotaStore((state) => state.antigravityQuota);
   const codexQuota = useQuotaStore((state) => state.codexQuota);
@@ -297,6 +299,23 @@ export function AuthFilesPage() {
   const [viewMode, setViewMode] = useState<'diagram' | 'list'>('list');
 
   const [prefixProxyEditor, setPrefixProxyEditor] = useState<PrefixProxyEditorState | null>(null);
+
+  // Test auth file state
+  const [testingFile, setTestingFile] = useState<string | null>(null);
+  const [testResultModalOpen, setTestResultModalOpen] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    fileName: string;
+    status: 'success' | 'error';
+    message: string;
+    responseText: string;
+    duration: number;
+  } | null>(null);
+  // Model picker for test
+  const [testModelPickerOpen, setTestModelPickerOpen] = useState(false);
+  const [testPickerItem, setTestPickerItem] = useState<AuthFileItem | null>(null);
+  const [testPickerModels, setTestPickerModels] = useState<AuthFileModelItem[]>([]);
+  const [testPickerLoading, setTestPickerLoading] = useState(false);
+  const [testPickerError, setTestPickerError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const loadingKeyStatsRef = useRef(false);
@@ -809,6 +828,178 @@ export function AuthFilesPage() {
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : '';
       showNotification(`${t('notification.download_failed')}: ${errorMessage}`, 'error');
+    }
+  };
+
+  // Test an auth file by sending a chat completion request
+  const AUTH_FILE_TEST_TIMEOUT_MS = 60_000;
+
+  // Step 1: Open model picker when Test button is clicked
+  const openTestModelPicker = async (item: AuthFileItem) => {
+    if (disableControls || testingFile) return;
+
+    const rawAuthIndex = item['auth_index'] ?? item.authIndex;
+    const authIndex =
+      rawAuthIndex !== undefined && rawAuthIndex !== null ? String(rawAuthIndex).trim() : '';
+
+    if (!authIndex) {
+      showNotification(t('auth_files.test_no_auth_index'), 'warning');
+      return;
+    }
+
+    setTestPickerItem(item);
+    setTestPickerModels([]);
+    setTestPickerError(null);
+    setTestModelPickerOpen(true);
+    setTestPickerLoading(true);
+
+    // Reuse cached models if available
+    const cached = modelsCacheRef.current.get(item.name);
+    if (cached && cached.length > 0) {
+      setTestPickerModels(cached);
+      setTestPickerLoading(false);
+      return;
+    }
+
+    try {
+      const models = await authFilesApi.getModelsForAuthFile(item.name);
+      modelsCacheRef.current.set(item.name, models);
+      setTestPickerModels(models);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (
+        errorMessage.includes('404') ||
+        errorMessage.includes('not found') ||
+        errorMessage.includes('Not Found')
+      ) {
+        setTestPickerError('unsupported');
+      } else {
+        setTestPickerError(errorMessage);
+      }
+    } finally {
+      setTestPickerLoading(false);
+    }
+  };
+
+  // Step 2: Execute test with selected model
+  const executeTestWithModel = async (modelId: string) => {
+    const item = testPickerItem;
+    if (!item) return;
+
+    setTestModelPickerOpen(false);
+
+    const rawAuthIndex = item['auth_index'] ?? item.authIndex;
+    const authIndex =
+      rawAuthIndex !== undefined && rawAuthIndex !== null ? String(rawAuthIndex).trim() : '';
+
+    setTestingFile(item.name);
+    const startTime = Date.now();
+
+    // Derive server base URL from apiBase (strip /v0/management suffix)
+    const serverBase = apiBase.replace(/\/?v0\/management\/?$/i, '').replace(/\/+$/, '');
+    const chatCompletionsUrl = `${serverBase}/v1/chat/completions`;
+
+    try {
+      // Fetch a valid api-key to authenticate with the proxy
+      let proxyApiKey = '';
+      try {
+        const keys = await apiKeysApi.list();
+        proxyApiKey = keys.length > 0 ? keys[0] : '';
+      } catch {
+        // Fall back without api-key
+      }
+
+      const result = await apiCallApi.request(
+        {
+          authIndex,
+          method: 'POST',
+          url: chatCompletionsUrl,
+          header: {
+            'Content-Type': 'application/json',
+            ...(proxyApiKey ? { Authorization: `Bearer ${proxyApiKey}` } : {}),
+          },
+          data: JSON.stringify({
+            model: modelId,
+            messages: [
+              {
+                role: 'user',
+                content:
+                  'hello, xin hãy trả lời tôi 1 câu chào dài khoảng 30 từ ngẫu nhiên',
+              },
+            ],
+            stream: false,
+            max_tokens: 200,
+            temperature: 1,
+          }),
+        },
+        { timeout: AUTH_FILE_TEST_TIMEOUT_MS }
+      );
+
+      const duration = Date.now() - startTime;
+
+      if (result.statusCode >= 200 && result.statusCode < 300) {
+        let replyText = '';
+        try {
+          const body =
+            typeof result.body === 'object' && result.body !== null
+              ? (result.body as Record<string, unknown>)
+              : null;
+          const choices = body?.choices as Array<Record<string, unknown>> | undefined;
+          const firstChoice = choices?.[0];
+          const message = firstChoice?.message as Record<string, unknown> | undefined;
+          replyText = (message?.content as string) ?? '';
+        } catch {
+          replyText = result.bodyText;
+        }
+
+        setTestResult({
+          fileName: item.name,
+          status: 'success',
+          message: `${t('auth_files.test_success')} (model: ${modelId})`,
+          responseText: replyText || result.bodyText,
+          duration,
+        });
+        setTestResultModalOpen(true);
+        showNotification(
+          `${t('auth_files.test_success')} (${(duration / 1000).toFixed(1)}s)`,
+          'success'
+        );
+      } else {
+        const errorMsg = getApiCallErrorMessage(result);
+        setTestResult({
+          fileName: item.name,
+          status: 'error',
+          message: `${t('auth_files.test_failed')}: ${errorMsg}`,
+          responseText: result.bodyText,
+          duration,
+        });
+        setTestResultModalOpen(true);
+        showNotification(`${t('auth_files.test_failed')}: ${errorMsg}`, 'error');
+      }
+    } catch (err: unknown) {
+      const duration = Date.now() - startTime;
+      const message = err instanceof Error ? err.message : String(err);
+      const isTimeout =
+        message.toLowerCase().includes('timeout') ||
+        (typeof err === 'object' &&
+          err !== null &&
+          'code' in err &&
+          (err as { code?: string }).code === 'ECONNABORTED');
+      const errorMessage = isTimeout
+        ? t('auth_files.test_timeout', { seconds: AUTH_FILE_TEST_TIMEOUT_MS / 1000 })
+        : message;
+
+      setTestResult({
+        fileName: item.name,
+        status: 'error',
+        message: `${t('auth_files.test_failed')}: ${errorMessage}`,
+        responseText: '',
+        duration,
+      });
+      setTestResultModalOpen(true);
+      showNotification(`${t('auth_files.test_failed')}: ${errorMessage}`, 'error');
+    } finally {
+      setTestingFile(null);
     }
   };
 
@@ -1706,6 +1897,20 @@ export function AuthFilesPage() {
                     <IconCode className={styles.actionIcon} size={16} />
                   </Button>
                   <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void openTestModelPicker(item)}
+                    className={`${styles.iconButton} ${testingFile === item.name ? styles.testingButton : ''}`}
+                    title={t('auth_files.test_button')}
+                    disabled={disableControls || testingFile !== null}
+                  >
+                    {testingFile === item.name ? (
+                      <LoadingSpinner size={14} />
+                    ) : (
+                      <IconZap className={styles.actionIcon} size={16} />
+                    )}
+                  </Button>
+                  <Button
                     variant="danger"
                     size="sm"
                     onClick={() => handleDelete(item.name)}
@@ -2213,6 +2418,110 @@ export function AuthFilesPage() {
                   />
                 </div>
               </>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Test Model Picker Modal */}
+      <Modal
+        open={testModelPickerOpen}
+        onClose={() => setTestModelPickerOpen(false)}
+        title={`${t('auth_files.test_select_model')} — ${testPickerItem?.name ?? ''}`}
+        footer={
+          <Button variant="secondary" onClick={() => setTestModelPickerOpen(false)}>
+            {t('common.cancel')}
+          </Button>
+        }
+      >
+        {testPickerLoading ? (
+          <div className={styles.hint}>
+            <LoadingSpinner size={14} />
+            <span style={{ marginLeft: 8 }}>{t('auth_files.test_loading_models')}</span>
+          </div>
+        ) : testPickerError === 'unsupported' ? (
+          <EmptyState
+            title={t('auth_files.models_unsupported', { defaultValue: 'Feature not supported in this version' })}
+            description={t('auth_files.models_unsupported_desc', {
+              defaultValue: 'Please update CLI Proxy API to the latest version',
+            })}
+          />
+        ) : testPickerError ? (
+          <EmptyState
+            title={t('auth_files.test_load_models_failed')}
+            description={testPickerError}
+          />
+        ) : testPickerModels.length === 0 ? (
+          <EmptyState
+            title={t('auth_files.models_empty', { defaultValue: 'No models available' })}
+            description={t('auth_files.models_empty_desc', {
+              defaultValue: 'This auth file has no models bound to it',
+            })}
+          />
+        ) : (
+          <div className={styles.modelsList}>
+            {testPickerModels
+              .filter((m) => !isModelExcluded(m.id, testPickerItem?.type || ''))
+              .map((model) => (
+                <div
+                  key={model.id}
+                  className={`${styles.modelItem} ${styles.modelItemSelectable}`}
+                  onClick={() => void executeTestWithModel(model.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      void executeTestWithModel(model.id);
+                    }
+                  }}
+                  title={t('auth_files.test_with_model', { model: model.id })}
+                >
+                  <IconZap className={styles.actionIcon} size={14} />
+                  <span className={styles.modelId}>{model.id}</span>
+                  {model.display_name && model.display_name !== model.id && (
+                    <span className={styles.modelDisplayName}>{model.display_name}</span>
+                  )}
+                  {model.type && <span className={styles.modelType}>{model.type}</span>}
+                </div>
+              ))}
+          </div>
+        )}
+      </Modal>
+
+      {/* Test Result Modal */}
+      <Modal
+        open={testResultModalOpen}
+        onClose={() => setTestResultModalOpen(false)}
+        title={`${t('auth_files.test_result_title')} — ${testResult?.fileName ?? ''}`}
+        footer={
+          <Button variant="secondary" onClick={() => setTestResultModalOpen(false)}>
+            {t('common.close')}
+          </Button>
+        }
+      >
+        {testResult && (
+          <div className={styles.testResultContent}>
+            <div
+              className={`${styles.testResultStatus} ${testResult.status === 'success' ? styles.testResultSuccess : styles.testResultError}`}
+            >
+              <span className={styles.testResultStatusIcon} aria-hidden="true">
+                {testResult.status === 'success' ? '✓' : '✗'}
+              </span>
+              <span>{testResult.message}</span>
+            </div>
+            <div className={styles.testResultMeta}>
+              <span>
+                {t('auth_files.test_duration')}: {(testResult.duration / 1000).toFixed(2)}s
+              </span>
+            </div>
+            {testResult.responseText && (
+              <div className={styles.testResultBody}>
+                <label id="test-response-label">{t('auth_files.test_response')}</label>
+                <pre className={styles.testResultPre} aria-labelledby="test-response-label">
+                  {testResult.responseText}
+                </pre>
+              </div>
             )}
           </div>
         )}

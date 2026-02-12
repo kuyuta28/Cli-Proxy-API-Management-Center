@@ -429,7 +429,19 @@
     "prefix_proxy_invalid_json": "该凭证文件不是 JSON 对象，无法编辑。",
     "prefix_proxy_saved_success": "已更新 \"{{name}}\"",
     "quota_refresh_success": "已刷新 \"{{name}}\" 的额度",
-    "quota_refresh_failed": "刷新 \"{{name}}\" 的额度失败：{{message}}"
+    "quota_refresh_failed": "刷新 \"{{name}}\" 的额度失败：{{message}}",
+    "test_button": "测试连接",
+    "test_no_auth_index": "该认证文件没有 auth_index，无法测试。",
+    "test_select_model": "选择要测试的模型",
+    "test_loading_models": "正在加载可用模型...",
+    "test_load_models_failed": "加载模型列表失败",
+    "test_with_model": "使用 {{model}} 测试",
+    "test_success": "测试成功 — 模型已响应。",
+    "test_failed": "测试失败",
+    "test_timeout": "测试请求在 {{seconds}} 秒后超时。",
+    "test_result_title": "测试结果",
+    "test_duration": "耗时",
+    "test_response": "响应内容"
   },
   "antigravity_quota": {
     "title": "Antigravity 额度",
